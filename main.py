@@ -30,12 +30,12 @@ async def on_say(text: str, priority: str):
 
 async def on_ws_connect(ws):
     if _window:
-        _window.set_state("idle")
+        _window.state_requested.emit("idle")
 
 
 async def on_avatar_state(state: str):
     if _window:
-        _window.set_state(state)
+        _window.state_requested.emit(state)
 
 
 # ── Async loop in background thread ───────────────────────────────────────────

@@ -155,11 +155,14 @@ class AgoraStateBridge(QObject):
 
 
 class AvatarWindow(QWidget):
-    # emitted when the embedded page finishes starting the agent
-    agent_ready = pyqtSignal()
+    # emitted when background WebSocket callbacks need GUI-thread operations
+    say_requested = pyqtSignal(str)
+    state_requested = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
+        self.say_requested.connect(self._play_say_slot)
+        self.state_requested.connect(self._set_state_slot)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -214,7 +217,15 @@ class AvatarWindow(QWidget):
     def set_state(self, state: str):
         self.shape.set_state(state)
 
+    @pyqtSlot(str)
+    def _set_state_slot(self, state: str):
+        self.set_state(state)
+
     def play_say(self, text: str):
+        self.say_requested.emit(text)
+
+    @pyqtSlot(str)
+    def _play_say_slot(self, text: str):
         import json
         payload = json.dumps(text)
         self._web.page().runJavaScript(f"playFallbackSpeech({payload})")
