@@ -120,8 +120,19 @@ class AvatarShape(QWidget):
 # ── Main window ────────────────────────────────────────────────────────────────
 
 class AvatarWebPage(QWebEnginePage):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.permissionRequested.connect(self._permission_requested)
+
     def javaScriptConsoleMessage(self, level, message, line_number, source_id):
         print(f"[vira-web:{source_id}:{line_number}] {message}")
+
+    def _permission_requested(self, permission):
+        if permission.permissionType() == permission.PermissionType.MediaAudioCapture:
+            print("[vira-web] granting microphone permission for", permission.origin().toString())
+            permission.grant()
+        else:
+            permission.deny()
 
     def featurePermissionRequested(self, security_origin, feature):
         if feature == QWebEnginePage.Feature.MediaAudioCapture:
@@ -202,6 +213,11 @@ class AvatarWindow(QWidget):
 
     def set_state(self, state: str):
         self.shape.set_state(state)
+
+    def play_say(self, text: str):
+        import json
+        payload = json.dumps(text)
+        self._web.page().runJavaScript(f"playFallbackSpeech({payload})")
 
     # drag to reposition
     def mousePressEvent(self, e):

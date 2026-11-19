@@ -12,6 +12,33 @@ const HEADERS = { "Content-Type": "application/json", "ngrok-skip-browser-warnin
 const CLIENT_ID = new URLSearchParams(location.search).get("client_id") || "";
 let lastAvatarState = "";
 
+async function playFallbackSpeech(text) {
+  if (!text) return;
+  try {
+    const response = await fetch(`${BACKEND}/tts/synthesize`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ text }),
+    });
+    if (!response.ok) throw new Error(`TTS failed: ${await response.text()}`);
+    const { audio } = await response.json();
+    const bytes = atob(audio);
+    const wav = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) wav[i] = bytes.charCodeAt(i);
+    const blob = new Blob([wav], { type: "audio/wav" });
+    const output = document.getElementById("vira-output");
+    output.src = URL.createObjectURL(blob);
+    output.muted = false;
+    output.volume = 1;
+    await output.play();
+    console.log("vira fallback TTS playing:", text);
+  } catch (error) {
+    console.error("vira fallback TTS failed:", error);
+  }
+}
+
+window.playFallbackSpeech = playFallbackSpeech;
+
 function setAvatarState(state) {
   if (state === lastAvatarState) return;
   lastAvatarState = state;
@@ -46,6 +73,21 @@ async function init() {
     if (mediaType === "audio") {
       user.audioTrack.setVolume(100);
       await user.audioTrack.play("vira-output");
+
+      try {
+        const playbackDevices = await AgoraRTC.getPlaybackDevices();
+        const playbackDetails = playbackDevices.map((device) => ({ label: device.label, deviceId: device.deviceId }));
+        console.log("vira playback devices:", playbackDetails);
+        const senarySpeaker = playbackDevices.find((device) => /senary|speaker|headphone/i.test(device.label));
+        const speaker = senarySpeaker || playbackDevices[0];
+        if (speaker?.deviceId) {
+          await user.audioTrack.setPlaybackDevice(speaker.deviceId);
+          console.log("vira playback device selected:", speaker.label, speaker.deviceId);
+        }
+      } catch (playbackError) {
+        console.warn("vira playback device selection failed:", playbackError);
+      }
+
       const output = document.getElementById("vira-output");
       output.muted = false;
       output.volume = 1;
@@ -57,6 +99,18 @@ async function init() {
 
   await client.join(cfg.app_id, cfg.channel_name, cfg.token, parseInt(cfg.uid));
 
+  const playbackContext = new (window.AudioContext || window.webkitAudioContext)();
+  await playbackContext.resume().catch(() => {});
+  const toneGain = playbackContext.createGain();
+  const oscillator = playbackContext.createOscillator();
+  oscillator.frequency.value = 440;
+  toneGain.gain.value = 0.15;
+  oscillator.connect(toneGain);
+  toneGain.connect(playbackContext.destination);
+  oscillator.start();
+  setTimeout(() => oscillator.stop(), 300);
+  console.log("vira startup tone:", playbackContext.state);
+
   client.enableAudioVolumeIndicator({
     interval: 200,
     smooth: 3,
@@ -64,19 +118,31 @@ async function init() {
   });
 
   client.on("volume-indicator", (result) => {
-    console.log("vira volume result:", result.map((speaker) => ({ uid: speaker.uid, volume: speaker.volume })));
+    const volumeDetails = result.map((speaker) => ({ uid: speaker.uid, volume: speaker.level ?? speaker.volume }));
+    console.log("vira volume result:", JSON.stringify(volumeDetails));
     let localSpeaking = false;
     let agentSpeaking = false;
 
     for (const speaker of result) {
       const uid = String(speaker.uid);
-      if (uid === String(cfg.uid) && speaker.volume > 8) localSpeaking = true;
-      if (uid === String(cfg.agent_uid) && speaker.volume > 8) agentSpeaking = true;
+      const speakerVolume = speaker.level ?? speaker.volume ?? 0;
+      if (uid === String(cfg.uid) && speakerVolume > 8) localSpeaking = true;
+      if (uid === String(cfg.agent_uid) && speakerVolume > 8) agentSpeaking = true;
+    }
+
+    if (agentSpeaking) {
+      const agentResult = result.find((speaker) => String(speaker.uid) === String(cfg.agent_uid));
+      console.log("vira agent volume:", agentResult?.level ?? agentResult?.volume);
+      fetch(`${BACKEND}/desktop/audio/log`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ event: "agent_volume", client_id: CLIENT_ID, uid: cfg.agent_uid, volume: agentResult?.level ?? agentResult?.volume }),
+      }).catch(() => {});
     }
 
     if (localSpeaking) {
       const localResult = result.find((speaker) => String(speaker.uid) === String(cfg.uid));
-      console.log("vira local mic volume:", localResult?.volume);
+      console.log("vira local mic volume:", localResult?.level ?? localResult?.volume);
     }
 
     if (agentSpeaking) setAvatarState("speaking");
@@ -90,7 +156,13 @@ async function init() {
 
   const devices = await navigator.mediaDevices.enumerateDevices();
   const inputDevices = devices.filter((device) => device.kind === "audioinput");
-  console.log("vira audio inputs:", inputDevices.map((device) => ({ label: device.label, deviceId: device.deviceId })));
+  const inputDetails = inputDevices.map((device) => ({ label: device.label, deviceId: device.deviceId }));
+  console.log("vira audio inputs:", inputDetails);
+  fetch(`${BACKEND}/desktop/audio/log`, {
+    method: "POST",
+    headers: HEADERS,
+    body: JSON.stringify({ event: "audio_inputs", client_id: CLIENT_ID, inputs: inputDetails }),
+  }).catch(() => {});
 
   const senaryMic = inputDevices.find((device) => /senary|microphone/i.test(device.label));
   const audioConstraints = senaryMic?.deviceId
@@ -99,14 +171,36 @@ async function init() {
 
   let mediaStream;
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
+    fetch(`${BACKEND}/desktop/audio/log`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ event: "capture_started", client_id: CLIENT_ID }),
+    }).catch(() => {});
+
+    const capturePromise = navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("Microphone getUserMedia timed out after 15 seconds")), 15000);
+    });
+    mediaStream = await Promise.race([capturePromise, timeoutPromise]);
   } catch (captureError) {
+    const errorDetails = { event: "capture_failed", client_id: CLIENT_ID, name: captureError.name, message: captureError.message };
+    console.error("vira capture failure:", errorDetails);
+    fetch(`${BACKEND}/desktop/audio/log`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify(errorDetails),
+    }).catch(() => {});
     throw new Error(`Microphone getUserMedia failed: ${captureError.name}: ${captureError.message}`);
   }
 
   const micTrack = mediaStream.getAudioTracks()[0];
   if (!micTrack) throw new Error("getUserMedia returned no audio track");
   console.log("vira captured mic:", micTrack.label, micTrack.readyState, micTrack.enabled);
+  fetch(`${BACKEND}/desktop/audio/log`, {
+    method: "POST",
+    headers: HEADERS,
+    body: JSON.stringify({ event: "capture_succeeded", client_id: CLIENT_ID, label: micTrack.label, readyState: micTrack.readyState, enabled: micTrack.enabled }),
+  }).catch(() => {});
 
   const mic = await AgoraRTC.createCustomAudioTrack({ mediaStreamTrack: micTrack });
   mic.setEnabled(true);

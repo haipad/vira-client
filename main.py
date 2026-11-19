@@ -24,9 +24,8 @@ _window: aw.AvatarWindow | None = None
 # ── WS callbacks → avatar state ───────────────────────────────────────────────
 
 async def on_say(text: str, priority: str):
-    # Actual listening/speaking/idle state comes from Agora volume events.
-    # This callback is reserved for side effects triggered by backend pushes.
-    pass
+    if _window:
+        _window.play_say(text)
 
 
 async def on_ws_connect(ws):
