@@ -1,0 +1,8 @@
+**/__pycache__/
+*.py[cod]
+.env
+xdump_config
+# Ignore the file or files named 'xdump_config'
+xdump_config
+# Ignore the .agora directory (remove the slash if it's a file)
+.agora/

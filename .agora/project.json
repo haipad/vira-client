@@ -1,0 +1,8 @@
+{
+  "projectId": "5Sjb2_oeH",
+  "projectName": "Default Project",
+  "region": "global",
+  "template": "python",
+  "scenario": "voice-agent",
+  "envPath": ".env"
+}

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head><title>vira audio</title></head>
+<body>
+<audio id="vira-output" autoplay playsinline></audio>
+<script src="https://download.agora.io/sdk/release/AgoraRTC_N-4.23.2.js"></script>
+<script>
+const BACKEND = new URLSearchParams(location.search).get("backend") || "http://127.0.0.1:8000";
+
+const HEADERS = { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" };
+
+const CLIENT_ID = new URLSearchParams(location.search).get("client_id") || "";
+let lastAvatarState = "";
+
+function setAvatarState(state) {
+  if (state === lastAvatarState) return;
+  lastAvatarState = state;
+  if (!CLIENT_ID) return;
+  fetch(`${BACKEND}/desktop/state?client_id=${encodeURIComponent(CLIENT_ID)}&state=${encodeURIComponent(state)}`, {
+    method: "POST",
+  }).catch((error) => console.error("avatar state failed:", error));
+}
+
+async function init() {
+  const res = await fetch(`${BACKEND}/get_config`, { headers: HEADERS });
+  const { data: cfg } = await res.json();
+
+  const startResponse = await fetch(`${BACKEND}/startAgent`, {
+    method: "POST",
+    headers: HEADERS,
+    body: JSON.stringify({
+      channelName: cfg.channel_name,
+      rtcUid: parseInt(cfg.agent_uid),
+      userUid: parseInt(cfg.uid),
+      accessId: "vira-desktop",
+    }),
+  });
+  if (!startResponse.ok) {
+    throw new Error(`startAgent failed: ${startResponse.status} ${await startResponse.text()}`);
+  }
+
+  const client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+
+  client.on("user-published", async (user, mediaType) => {
+    await client.subscribe(user, mediaType);
+    if (mediaType === "audio") {
+      user.audioTrack.setVolume(100);
+      await user.audioTrack.play("vira-output");
+      const output = document.getElementById("vira-output");
+      output.muted = false;
+      output.volume = 1;
+      await output.play().catch((error) => console.warn("vira output play retry needed:", error));
+      console.log("vira agent audio playing:", output.currentTime, output.paused, output.muted);
+    }
+  });
+
+
+  await client.join(cfg.app_id, cfg.channel_name, cfg.token, parseInt(cfg.uid));
+
+  client.enableAudioVolumeIndicator({
+    interval: 200,
+    smooth: 3,
+    reportSelfVolume: true,
+  });
+
+  client.on("volume-indicator", (result) => {
+    console.log("vira volume result:", result.map((speaker) => ({ uid: speaker.uid, volume: speaker.volume })));
+    let localSpeaking = false;
+    let agentSpeaking = false;
+
+    for (const speaker of result) {
+      const uid = String(speaker.uid);
+      if (uid === String(cfg.uid) && speaker.volume > 8) localSpeaking = true;
+      if (uid === String(cfg.agent_uid) && speaker.volume > 8) agentSpeaking = true;
+    }
+
+    if (localSpeaking) {
+      const localResult = result.find((speaker) => String(speaker.uid) === String(cfg.uid));
+      console.log("vira local mic volume:", localResult?.volume);
+    }
+
+    if (agentSpeaking) setAvatarState("speaking");
+    else if (localSpeaking) setAvatarState("listening");
+    else setAvatarState("idle");
+  });
+
+  if (!navigator.mediaDevices?.enumerateDevices || !navigator.mediaDevices?.getUserMedia) {
+    throw new Error("Browser mediaDevices API is unavailable");
+  }
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const inputDevices = devices.filter((device) => device.kind === "audioinput");
+  console.log("vira audio inputs:", inputDevices.map((device) => ({ label: device.label, deviceId: device.deviceId })));
+
+  const senaryMic = inputDevices.find((device) => /senary|microphone/i.test(device.label));
+  const audioConstraints = senaryMic?.deviceId
+    ? { deviceId: { exact: senaryMic.deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    : { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+
+  let mediaStream;
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
+  } catch (captureError) {
+    throw new Error(`Microphone getUserMedia failed: ${captureError.name}: ${captureError.message}`);
+  }
+
+  const micTrack = mediaStream.getAudioTracks()[0];
+  if (!micTrack) throw new Error("getUserMedia returned no audio track");
+  console.log("vira captured mic:", micTrack.label, micTrack.readyState, micTrack.enabled);
+
+  const mic = await AgoraRTC.createCustomAudioTrack({ mediaStreamTrack: micTrack });
+  mic.setEnabled(true);
+  mic.setVolume(100);
+  await mic.setMuted(false);
+  await client.publish(mic);
+  console.log("vira microphone published:", cfg.uid, "label:", micTrack?.label, "state:", micTrack?.readyState, "enabled:", micTrack?.enabled);
+  setAvatarState("idle");
+
+  console.log("vira audio ready — channel:", cfg.channel_name);
+}
+
+init().catch((error) => {
+  console.error("vira init failed:", error);
+  setAvatarState("idle");
+});
+</script>
+</body>
+</html>
