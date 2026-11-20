@@ -8,10 +8,11 @@ Swap out AvatarShape.paintEvent() with any 2D character renderer later.
 
 import os
 import sys
+from urllib.parse import urlencode
 
 # Apply before QWebEngineView/QApplication initializes Chromium.
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--autoplay-policy=no-user-gesture-required")
-from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtProperty, pyqtSignal, pyqtSlot, QObject, QUrl, QUrlQuery
+from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtProperty, pyqtSignal, pyqtSlot, QObject, QUrl
 from PyQt6.QtGui import QPainter, QColor, QRadialGradient
 from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout
 from PyQt6.QtWebChannel import QWebChannel
@@ -202,13 +203,28 @@ class AvatarWindow(QWidget):
         self.move(screen.right() - self.width() - 20,
                   screen.bottom() - self.height() - 20)
 
-    def load_audio(self, client_id: str):
-        backend = os.environ.get("VEERA_BACKEND_URL", "http://127.0.0.1:8000")
-        url = QUrl(f"{backend}/vira.html")
-        query = QUrlQuery()
-        query.addQueryItem("backend", backend)
-        query.addQueryItem("client_id", client_id)
-        url.setQuery(query)
+    def load_audio(self, client_id: str, rtc_config: dict | None = None, access_id: str = "vira-desktop", user_name: str = "User"):
+        backend = os.environ.get("VEERA_BACKEND_URL", "http://127.0.0.1:8010")
+        local_url = os.environ.get("VIRA_LOCAL_URL", "http://127.0.0.1:8021")
+        access_id = os.environ.get("VEERA_ACCESS_ID", "vira-desktop")
+        user_name = os.environ.get("VEERA_USER_NAME", "User")
+        url = QUrl(f"{local_url}/vira.html")
+        params = {
+            "backend": backend,
+            "client_id": client_id,
+            "access_id": access_id,
+            "user_name": user_name,
+        }
+        if rtc_config:
+            print("[vira-client] RTC app_id:", rtc_config["app_id"], "channel:", rtc_config["channel"], "uid:", rtc_config["uid"])
+            params.update({
+                "app_id": str(rtc_config["app_id"]),
+                "channel": rtc_config["channel"],
+                "uid": str(rtc_config["uid"]),
+                "token": rtc_config["token"],
+            })
+        # urlencode escapes '+' in the token; Qt would leave it raw and JS would decode it as a space.
+        url.setQuery(urlencode(params))
         self._web.load(url)
 
     def _on_load_finished(self, success: bool):

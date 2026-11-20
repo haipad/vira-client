@@ -10,7 +10,10 @@ const BACKEND = new URLSearchParams(location.search).get("backend") || "http://1
 const HEADERS = { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" };
 
 const CLIENT_ID = new URLSearchParams(location.search).get("client_id") || "";
+const ACCESS_ID = new URLSearchParams(location.search).get("access_id") || "vira-desktop";
+const USER_NAME = new URLSearchParams(location.search).get("user_name") || "User";
 let lastAvatarState = "";
+let agoraMicTrack = null;
 
 async function playFallbackSpeech(text) {
   if (!text) return;
@@ -49,21 +52,15 @@ function setAvatarState(state) {
 }
 
 async function init() {
-  const res = await fetch(`${BACKEND}/get_config`, { headers: HEADERS });
-  const { data: cfg } = await res.json();
-
-  const startResponse = await fetch(`${BACKEND}/startAgent`, {
-    method: "POST",
-    headers: HEADERS,
-    body: JSON.stringify({
-      channelName: cfg.channel_name,
-      rtcUid: parseInt(cfg.agent_uid),
-      userUid: parseInt(cfg.uid),
-      accessId: "vira-desktop",
-    }),
-  });
-  if (!startResponse.ok) {
-    throw new Error(`startAgent failed: ${startResponse.status} ${await startResponse.text()}`);
+  const params = new URLSearchParams(location.search);
+  const cfg = {
+    app_id: params.get("app_id"),
+    channel_name: params.get("channel"),
+    uid: params.get("uid"),
+    token: params.get("token"),
+  };
+  if (!cfg.app_id || !cfg.channel_name || !cfg.uid || !cfg.token) {
+    throw new Error("Missing client-generated Agora RTC configuration");
   }
 
   const client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
@@ -97,6 +94,7 @@ async function init() {
   });
 
 
+  console.log("vira join config:", { app_id: cfg.app_id, channel_name: cfg.channel_name, uid: parseInt(cfg.uid), token_present: Boolean(cfg.token) });
   await client.join(cfg.app_id, cfg.channel_name, cfg.token, parseInt(cfg.uid));
 
   const playbackContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -166,8 +164,8 @@ async function init() {
 
   const senaryMic = inputDevices.find((device) => /senary|microphone/i.test(device.label));
   const audioConstraints = senaryMic?.deviceId
-    ? { deviceId: { exact: senaryMic.deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-    : { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+    ? { deviceId: { exact: senaryMic.deviceId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    : { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
 
   let mediaStream;
   try {
@@ -202,11 +200,11 @@ async function init() {
     body: JSON.stringify({ event: "capture_succeeded", client_id: CLIENT_ID, label: micTrack.label, readyState: micTrack.readyState, enabled: micTrack.enabled }),
   }).catch(() => {});
 
-  const mic = await AgoraRTC.createCustomAudioTrack({ mediaStreamTrack: micTrack });
-  mic.setEnabled(true);
-  mic.setVolume(100);
-  await mic.setMuted(false);
-  await client.publish(mic);
+  agoraMicTrack = await AgoraRTC.createCustomAudioTrack({ mediaStreamTrack: micTrack });
+  agoraMicTrack.setEnabled(true);
+  agoraMicTrack.setVolume(100);
+  await agoraMicTrack.setMuted(false);
+  await client.publish(agoraMicTrack);
   console.log("vira microphone published:", cfg.uid, "label:", micTrack?.label, "state:", micTrack?.readyState, "enabled:", micTrack?.enabled);
   setAvatarState("idle");
 

@@ -1,4 +1,5 @@
 **/__pycache__/
+__pycache__/
 *.py[cod]
 .env
 xdump_config
@@ -6,3 +7,10 @@ xdump_config
 xdump_config
 # Ignore the .agora directory (remove the slash if it's a file)
 .agora/
+*.pyc
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc

@@ -1,8 +1,6 @@
 {
-  "projectId": "5Sjb2_oeH",
-  "projectName": "Default Project",
+  "projectId": "mHU7DTtn1",
+  "projectName": "Veera Voice",
   "region": "global",
-  "template": "python",
-  "scenario": "voice-agent",
-  "envPath": ".env"
+  "projectType": "node"
 }
