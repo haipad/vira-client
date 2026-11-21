@@ -93,7 +93,7 @@ class DocumentReferenceTests(unittest.TestCase):
         self.assertEqual(self._inspect('missing')['status'], 'not_found')
         self.assertEqual(self._inspect('script')['status'], 'not_found')
 
-    def test_local_reference_is_removed_only_after_successful_server_processing(self):
+    def test_local_reference_remains_available_until_expiry_after_processing(self):
         path = self._file('plan.docx')
         metadata = self._inspect('plan')
         reference = metadata['document_ref']
@@ -101,7 +101,7 @@ class DocumentReferenceTests(unittest.TestCase):
         self.assertIn(reference, actions._DOCUMENT_REFS)
         with patch.object(actions, '_launch') as launch:
             actions.finish_document_ref(reference, path, read_succeeded=True, open_after_read=True)
-        self.assertNotIn(reference, actions._DOCUMENT_REFS)
+        self.assertIn(reference, actions._DOCUMENT_REFS)
         launch.assert_called_once_with(path)
 
 

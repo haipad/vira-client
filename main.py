@@ -62,6 +62,11 @@ async def on_avatar_state(state: str):
         _window.state_requested.emit(state)
 
 
+async def on_transcript(speaker: str, text: str):
+    if _window:
+        _window.transcript_requested.emit(speaker, text)
+
+
 # ── Async loop in background thread ───────────────────────────────────────────
 
 def _run_async(loop: asyncio.AbstractEventLoop, client_id: str, rtc_config: dict, access_id: str, user_name: str):
@@ -72,6 +77,7 @@ def _run_async(loop: asyncio.AbstractEventLoop, client_id: str, rtc_config: dict
         agent_id = await agent.start(
             channel=rtc_config["channel"],
             user_uid=rtc_config["uid"],
+            agent_uid=rtc_config["agent_uid"],
             access_id=access_id,
             user_name=user_name,
         )
@@ -82,6 +88,7 @@ def _run_async(loop: asyncio.AbstractEventLoop, client_id: str, rtc_config: dict
             on_say=on_say,
             on_connect=on_ws_connect,
             on_state=on_avatar_state,
+            on_transcript=on_transcript,
         )
 
     loop.run_until_complete(run_client())

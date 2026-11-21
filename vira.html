@@ -57,6 +57,7 @@ async function init() {
     app_id: params.get("app_id"),
     channel_name: params.get("channel"),
     uid: params.get("uid"),
+    agent_uid: params.get("agent_uid"),
     token: params.get("token"),
   };
   if (!cfg.app_id || !cfg.channel_name || !cfg.uid || !cfg.token) {
@@ -94,7 +95,13 @@ async function init() {
   });
 
 
-  console.log("vira join config:", { app_id: cfg.app_id, channel_name: cfg.channel_name, uid: parseInt(cfg.uid), token_present: Boolean(cfg.token) });
+  console.log("vira join config:", {
+    app_id: cfg.app_id,
+    channel_name: cfg.channel_name,
+    uid: parseInt(cfg.uid),
+    agent_uid: cfg.agent_uid,
+    token_present: Boolean(cfg.token),
+  });
   await client.join(cfg.app_id, cfg.channel_name, cfg.token, parseInt(cfg.uid));
 
   const playbackContext = new (window.AudioContext || window.webkitAudioContext)();

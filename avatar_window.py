@@ -1,20 +1,18 @@
 """
-Avatar desktop widget.
-Frameless, always-on-top window with an animated shape.
+Avatar desktop widget with a sprite-based face.
 States: idle | listening | speaking
-
-Swap out AvatarShape.paintEvent() with any 2D character renderer later.
 """
 
 import os
 import sys
+from pathlib import Path
 from urllib.parse import urlencode
 
 # Apply before QWebEngineView/QApplication initializes Chromium.
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--autoplay-policy=no-user-gesture-required")
-from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtProperty, pyqtSignal, pyqtSlot, QObject, QUrl
-from PyQt6.QtGui import QPainter, QColor, QRadialGradient
-from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot, QObject, QUrl
+from PyQt6.QtGui import QPainter, QPixmap
+from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QPlainTextEdit
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -23,99 +21,57 @@ BACKEND = os.environ.get("VEERA_PUBLIC_URL", "http://localhost:8000")
 
 # ── Avatar shape widget ────────────────────────────────────────────────────────
 
-STATE_COLORS = {
-    "idle":      QColor(80, 120, 220),
-    "listening": QColor(60, 200, 120),
-    "speaking":  QColor(220, 100, 60),
-}
+AVATAR_ASSETS = Path(__file__).resolve().parent / "assets" / "avatar"
+OPEN_FRAME_X_OFFSET = 50
 
 class AvatarShape(QWidget):
-    """
-    A pulsing circle. Replace paintEvent() with your 2D character later.
-    """
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(200, 200)
         self._state = "idle"
-        self._pulse = 0.0          # 0.0 → 1.0, drives size oscillation
-
-        self._anim = QPropertyAnimation(self, b"pulse")
-        self._anim.setDuration(900)
-        self._anim.setStartValue(0.0)
-        self._anim.setEndValue(1.0)
-        self._anim.setEasingCurve(QEasingCurve.Type.SineCurve)
-        self._anim.setLoopCount(-1)
-        self._anim.start()
-
-    @pyqtProperty(float)
-    def pulse(self):
-        return self._pulse
-
-    @pulse.setter
-    def pulse(self, v):
-        self._pulse = v
-        self.update()
+        self._mouth_open = False
+        self._frame_index = 0
+        self._frame_delays = (130, 190, 120, 220)
+        self._closed_frame = QPixmap(str(AVATAR_ASSETS / "face_closed.png"))
+        self._open_frame = QPixmap(str(AVATAR_ASSETS / "face_open.png"))
+        self._speech_timer = QTimer(self)
+        self._speech_timer.timeout.connect(self._advance_speech_frame)
 
     def set_state(self, state: str):
+        if state not in ("idle", "listening", "speaking") or state == self._state:
+            return
+        was_speaking = self._state == "speaking"
         self._state = state
+        if state == "speaking":
+            self._mouth_open = False
+            self._frame_index = 0
+            self._speech_timer.start(self._frame_delays[0])
+        elif was_speaking:
+            self._speech_timer.stop()
+            self._mouth_open = False
+        self.update()
+
+    def _advance_speech_frame(self):
+        if self._state != "speaking":
+            self._speech_timer.stop()
+            return
+        self._mouth_open = not self._mouth_open
+        self._frame_index = (self._frame_index + 1) % len(self._frame_delays)
+        self._speech_timer.start(self._frame_delays[self._frame_index])
         self.update()
 
     def paintEvent(self, _):
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        w, h = self.width(), self.height()
-        cx, cy = w / 2, h / 2
-
-        base_r = min(w, h) * 0.30
-        pulse_r = base_r + self._pulse * base_r * 0.18
-
-        color = STATE_COLORS.get(self._state, STATE_COLORS["idle"])
-
-        # outer glow
-        grad = QRadialGradient(cx, cy, pulse_r * 1.4)
-        glow = QColor(color)
-        glow.setAlpha(40)
-        grad.setColorAt(0, glow)
-        grad.setColorAt(1, QColor(0, 0, 0, 0))
-        p.setBrush(grad)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(int(cx - pulse_r * 1.4), int(cy - pulse_r * 1.4),
-                      int(pulse_r * 2.8), int(pulse_r * 2.8))
-
-        # main circle
-        p.setBrush(color)
-        p.drawEllipse(int(cx - pulse_r), int(cy - pulse_r),
-                      int(pulse_r * 2), int(pulse_r * 2))
-
-        # face dots (eyes) — remove when you add a real character
-        eye_color = QColor(255, 255, 255, 200)
-        p.setBrush(eye_color)
-        eye_r = pulse_r * 0.10
-        p.drawEllipse(int(cx - pulse_r * 0.25 - eye_r), int(cy - pulse_r * 0.15 - eye_r),
-                      int(eye_r * 2), int(eye_r * 2))
-        p.drawEllipse(int(cx + pulse_r * 0.25 - eye_r), int(cy - pulse_r * 0.15 - eye_r),
-                      int(eye_r * 2), int(eye_r * 2))
-
-        # mouth — wiggles when speaking
-        mouth_w = pulse_r * 0.4
-        mouth_y = cy + pulse_r * 0.25
-        p.setPen(QColor(255, 255, 255, 180))
-        if self._state == "speaking":
-            mouth_h = pulse_r * 0.12 + self._pulse * pulse_r * 0.10
-            p.setBrush(QColor(255, 255, 255, 180))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(int(cx - mouth_w / 2), int(mouth_y),
-                          int(mouth_w), int(mouth_h * 2))
-        else:
-            from PyQt6.QtCore import QRectF
-            from PyQt6.QtGui import QPen
-            pen = QPen(QColor(255, 255, 255, 180), 2)
-            p.setPen(pen)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawArc(int(cx - mouth_w / 2), int(mouth_y - mouth_w * 0.3),
-                      int(mouth_w), int(mouth_w * 0.6), 0, -180 * 16)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        sprite = self._open_frame if self._state == "speaking" and self._mouth_open else self._closed_frame
+        if sprite.isNull():
+            return
+        scaled = sprite.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        x = (self.width() - scaled.width()) // 2
+        if self._state == "speaking" and self._mouth_open:
+            x += round(OPEN_FRAME_X_OFFSET * scaled.width() / sprite.width())
+        y = (self.height() - scaled.height()) // 2
+        p.drawPixmap(x, y, scaled)
 
 
 # ── Main window ────────────────────────────────────────────────────────────────
@@ -155,29 +111,66 @@ class AgoraStateBridge(QObject):
             self.stateChanged.emit(state)
 
 
+class TranscriptPanel(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("""
+            TranscriptPanel { background: rgba(25, 30, 38, 235); border-radius: 6px; }
+            QLabel { color: #b7c8c9; font-size: 11px; font-weight: 600; }
+            QPlainTextEdit { color: #ffffff; background: transparent; border: 0; font-size: 12px; }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setSpacing(2)
+        self.fields = {}
+        for speaker, label in (("user", "You"), ("assistant", "Vira")):
+            layout.addWidget(QLabel(label))
+            field = QPlainTextEdit()
+            field.setReadOnly(True)
+            field.setFixedHeight(52)
+            field.setPlaceholderText("Waiting..." if speaker == "user" else "")
+            layout.addWidget(field)
+            self.fields[speaker] = field
+
+    def set_transcript(self, speaker: str, text: str):
+        if speaker not in self.fields:
+            return
+        if speaker == "user":
+            self.fields["assistant"].clear()
+        field = self.fields[speaker]
+        field.setPlainText(text)
+        field.verticalScrollBar().setValue(0)
+
+
 class AvatarWindow(QWidget):
     # emitted when background WebSocket callbacks need GUI-thread operations
     say_requested = pyqtSignal(str)
     state_requested = pyqtSignal(str)
+    transcript_requested = pyqtSignal(str, str)
 
     def __init__(self):
         super().__init__()
         self.say_requested.connect(self._play_say_slot)
         self.state_requested.connect(self._set_state_slot)
+        self.transcript_requested.connect(self._set_transcript_slot)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(220, 260)
+        self.setFixedSize(340, 440)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         self.shape = AvatarShape(self)
-        layout.addWidget(self.shape)
+        self.shape.setFixedSize(250, 260)
+        layout.addWidget(self.shape, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self.transcript = TranscriptPanel(self)
+        layout.addWidget(self.transcript)
 
         # hidden WebEngine for Agora audio
         self._web = QWebEngineView(self)
@@ -216,11 +209,17 @@ class AvatarWindow(QWidget):
             "user_name": user_name,
         }
         if rtc_config:
-            print("[vira-client] RTC app_id:", rtc_config["app_id"], "channel:", rtc_config["channel"], "uid:", rtc_config["uid"])
+            print(
+                "[vira-client] RTC app_id:", rtc_config["app_id"],
+                "channel:", rtc_config["channel"],
+                "uid:", rtc_config["uid"],
+                "agent_uid:", rtc_config["agent_uid"],
+            )
             params.update({
                 "app_id": str(rtc_config["app_id"]),
                 "channel": rtc_config["channel"],
                 "uid": str(rtc_config["uid"]),
+                "agent_uid": str(rtc_config["agent_uid"]),
                 "token": rtc_config["token"],
             })
         # urlencode escapes '+' in the token; Qt would leave it raw and JS would decode it as a space.
@@ -236,6 +235,10 @@ class AvatarWindow(QWidget):
     @pyqtSlot(str)
     def _set_state_slot(self, state: str):
         self.set_state(state)
+
+    @pyqtSlot(str, str)
+    def _set_transcript_slot(self, speaker: str, text: str):
+        self.transcript.set_transcript(speaker, text)
 
     def play_say(self, text: str):
         self.say_requested.emit(text)

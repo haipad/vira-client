@@ -85,6 +85,61 @@ class FileSearchTests(unittest.TestCase):
 
         self.assertEqual(actions.find_file('budget.xlsx', [self.root]), sheet)
 
+    def test_spoken_extension_word_narrows_and_ranks_the_exact_file(self):
+        self._touch('Hari_resume_updated.pdf')
+        exact = self._touch('Hari_resume.pdf')
+
+        matches = actions.find_file_matches('Hari resume PDF', [self.root])
+
+        self.assertEqual(matches[0][2], exact)
+        self.assertEqual(matches[0][0], 4)
+        self.assertEqual(len(matches), 2)
+
+    def test_optional_owner_hint_prefers_matching_files(self):
+        self._touch('Baskar_QA_Engineer_Resume.pdf')
+        own_resume = self._touch('Hari_resume.pdf')
+        self._touch('Akshuni_Raghuwanshi_Resume.pdf')
+
+        matches = actions.find_file_matches('resume', [self.root], owner_hint='Hari')
+
+        self.assertEqual(matches[0][2], own_resume)
+        self.assertGreater(matches[0][0], matches[1][0])
+
+    def test_filename_pattern_narrows_candidates_but_open_still_checks_ambiguity(self):
+        own = self._touch('Hari_resume.pdf')
+        self._touch('Hari_resume_old.pdf')
+        self._touch('Baskar_resume.pdf')
+        pattern = r'^Hari.*resume.*\.pdf$'
+
+        matches = actions.find_file_matches('resume file', [self.root], filename_pattern=pattern)
+        with patch.object(actions, 'search_roots', return_value=[self.root]), patch.object(actions, '_launch') as launch:
+            result = actions.open_file_by_name('resume file', filename_pattern=pattern)
+
+        self.assertEqual({path.name for _, _, path in matches}, {'Hari_resume.pdf', 'Hari_resume_old.pdf'})
+        self.assertEqual(result['status'], 'ambiguous')
+        launch.assert_not_called()
+        self.assertEqual(own.name, 'Hari_resume.pdf')
+
+    def test_filename_pattern_rejects_paths_complex_syntax_and_oversized_patterns(self):
+        self._touch('Hari_resume.pdf')
+        invalid_patterns = (
+            r'C:\Users\*\resume.pdf',
+            r'(Hari|Baskar).*resume.*\.pdf',
+            r'(a+)+\.pdf',
+            'a' * 101,
+        )
+        with patch.object(actions, 'search_roots', return_value=[self.root]), patch.object(actions, '_launch') as launch:
+            for pattern in invalid_patterns:
+                result = actions.open_file_by_name('resume', filename_pattern=pattern)
+                self.assertFalse(result['ok'], pattern)
+        launch.assert_not_called()
+
+    def test_short_asr_fragment_is_ignored_instead_of_substring_matching(self):
+        harithaa = self._touch('Harithaa_Resume_Nov3_2025.pdf')
+
+        self.assertIsNone(actions.find_file('RE', [self.root]))
+        self.assertEqual(actions.find_file('resume', [self.root]), harithaa)
+
     def test_executables_and_scripts_are_never_opened(self):
         for name in ('setup.exe', 'run.bat', 'task.ps1', 'link.lnk', 'macro.vbs', 'tool.py'):
             self._touch(name)
@@ -121,6 +176,81 @@ class FileSearchTests(unittest.TestCase):
         launch.assert_not_called()
         self.assertFalse(result['ok'])
 
+    def test_open_file_asks_for_choice_when_multiple_candidates_match(self):
+        first = self._touch('Hari_resume.pdf', mtime=1_000_000)
+        second = self._touch('Harithaa_Resume_Nov3_2025.pdf', mtime=2_000_000)
+
+        with patch.object(actions, 'search_roots', return_value=[self.root]), patch.object(actions, '_launch') as launch:
+            result = actions.open_file_by_name('RE resume')
+
+        launch.assert_not_called()
+        self.assertEqual(result['status'], 'ambiguous')
+        self.assertEqual(result['matches'], [second.name, first.name])
+        self.assertIn('Say which to open', actions.outcome_text({'action': 'open_file'}, result))
+
+    def test_explicit_full_name_ranks_exact_file_first_and_opens_it(self):
+        self._touch('Harithaa_Resume_Nov3_2025.pdf')
+        exact = self._touch('Hari_resume.pdf')
+
+        with patch.object(actions, 'search_roots', return_value=[self.root]), patch.object(actions, '_launch') as launch:
+            result = actions.open_file_by_name('Hari resume.pdf')
+
+        launch.assert_called_once_with(exact)
+        self.assertEqual(result['file'], exact.name)
+
+    def test_selected_folder_resolves_duplicate_resume_names(self):
+        documents = self.root / 'Documents'
+        downloads = self.root / 'Downloads'
+        documents.mkdir()
+        downloads.mkdir()
+        self._touch('Documents/Hari_resume.pdf')
+        selected = self._touch('Downloads/Hari_resume.pdf')
+
+        with patch.object(actions, 'known_folder', side_effect=lambda folder: self.root / folder.title()), \
+             patch.object(actions, '_launch') as launch:
+            result = actions.open_file_by_name('Hari resume PDF', folder='downloads')
+
+        launch.assert_called_once_with(selected)
+        self.assertEqual(result['path'], str(selected))
+
+    def test_candidate_search_is_read_only_and_selected_id_opens_exact_file(self):
+        first = self._touch('Documents/Hari_resume.pdf')
+        self._touch('Downloads/Other_resume.pdf')
+        with patch.object(actions, 'search_roots', return_value=[self.root]), \
+             patch.object(actions, '_launch') as launch:
+            result = actions.search_file_candidates('resume', owner_hint='Hari')
+            self.assertEqual(result['candidates'][0]['name'], first.name)
+            self.assertNotIn(str(self.root), str(result))
+            launch.assert_not_called()
+            opened = actions.open_file_candidate(result['candidates'][0]['id'])
+            launch.assert_called_once_with(first)
+            self.assertTrue(opened['ok'])
+            self.assertFalse(actions.open_file_candidate(result['candidates'][0]['id'])['ok'])
+
+    def test_candidate_ref_rejects_changed_file(self):
+        path = self._touch('resume.pdf')
+        with patch.object(actions, 'search_roots', return_value=[self.root]), \
+             patch.object(actions, '_launch') as launch:
+            result = actions.search_file_candidates('resume')
+            path.write_text('changed')
+            opened = actions.open_file_candidate(result['candidates'][0]['id'])
+            self.assertFalse(opened['ok'])
+            launch.assert_not_called()
+
+    def test_opened_candidate_can_be_read_by_reference_without_researching(self):
+        path = self._touch('Documents/resume.txt')
+        self._touch('Downloads/resume.txt')
+        with patch.object(actions, 'search_roots', return_value=[self.root]), \
+             patch.object(actions, '_launch') as launch:
+            candidates = actions.search_file_candidates('resume')['candidates']
+            choice = next(item for item in candidates if item['folder'].endswith('Documents'))
+            opened = actions.open_file_candidate(choice['id'])
+            local = actions.read_document_ref(opened['document']['document_ref'])
+
+        launch.assert_called_once_with(path)
+        self.assertEqual(opened['document']['file'], path.name)
+        self.assertEqual(local['path'], path)
+
 
 class ActionRunnerTests(unittest.TestCase):
     def test_unknown_and_malformed_actions_fail_safely(self):
@@ -137,6 +267,29 @@ class ActionRunnerTests(unittest.TestCase):
 
         self.assertEqual(actions.outcome_text(action, {'ok': True, 'file': 'Resume.pdf'}), 'Opening Resume.pdf for you.')
         self.assertEqual(actions.outcome_text(action, {'ok': False}), "Couldn't find it.")
+
+    def test_open_file_outcomes_are_grounded_in_the_actual_result(self):
+        success = actions.outcome_text(
+            {'action': 'open_file', 'name': 'resume', 'success_message': 'Found your passport.'},
+            {'ok': True, 'file': 'Hari_resume.pdf'},
+        )
+        failure = actions.outcome_text(
+            {'action': 'open_file', 'name': 'resume file', 'failure_message': 'Opened it.'},
+            {'ok': False, 'error': 'not found'},
+        )
+
+        self.assertEqual(success, 'Opened Hari_resume.pdf.')
+        self.assertIn('could not find a file matching "resume file"', failure)
+
+    def test_ambiguous_open_file_asks_from_ranked_matches_not_a_generic_failure(self):
+        result = actions.outcome_text(
+            {'action': 'open_file', 'name': 'resume', 'failure_message': 'No problem.'},
+            {'ok': False, 'status': 'ambiguous', 'matches': ['Hari_resume.pdf in Downloads', 'Other_resume.pdf in Documents']},
+        )
+
+        self.assertIn('Hari_resume.pdf in Downloads', result)
+        self.assertIn('Other_resume.pdf in Documents', result)
+        self.assertIn('which to open', result.lower())
 
     def test_failure_message_names_the_requested_file_when_nothing_was_matched(self):
         action = {'name': 'passport', 'failure_message': 'I could not find {file}.'}
@@ -157,9 +310,58 @@ class ActionRunnerTests(unittest.TestCase):
             self.assertTrue(Path(result['path']).is_file())
             self.assertEqual(Path(result['path']).parent, Path(pictures) / 'Screenshots')
             self.assertTrue(result['file'].startswith('screenshot-'))
+            self.assertEqual(result['location'], 'Pictures/Screenshots')
+
+    def test_screenshot_success_announcement_includes_the_folder(self):
+        self.assertIn('Pictures/Screenshots', actions.outcome_text(
+            {'action': 'take_screenshot', 'success_message': 'Done.'}, {'ok': True},
+        ))
 
 
 class WebSocketActionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transcript_event_reaches_the_caption_callback(self):
+        import json
+        import ws_client
+        from unittest.mock import AsyncMock
+
+        callback = AsyncMock()
+        await ws_client._handle(json.dumps({'type': 'transcript', 'speaker': 'user', 'text': 'Hello'}), on_transcript=callback)
+        callback.assert_awaited_once_with('user', 'Hello')
+
+    async def test_execute_action_returns_correlated_client_acknowledgement(self):
+        import json
+        import ws_client
+
+        with patch.object(ws_client, 'run_action', return_value={'ok': True, 'file': 'shot.png', 'path': 'private/path'}) as run:
+            result = await ws_client._handle(json.dumps({
+                'type': 'execute_action', 'id': 'action-id', 'action': {'action': 'take_screenshot'},
+            }))
+
+        run.assert_called_once_with({'action': 'take_screenshot'})
+        self.assertEqual(result['id'], 'action-id')
+        self.assertTrue(result['result']['ok'])
+        self.assertNotIn('path', result['result'])
+
+    async def test_file_search_and_selected_open_return_correlated_results(self):
+        import json
+        import ws_client
+
+        search_result = {'ok': True, 'candidates': [{'id': 'opaque', 'name': 'resume.pdf', 'folder': 'Documents'}]}
+        with patch.object(ws_client, 'search_file_candidates', return_value=search_result) as search, \
+             patch.object(ws_client, 'open_file_candidate', return_value={'ok': True, 'file': 'resume.pdf'}) as open_choice:
+            found = await ws_client._handle(json.dumps({
+                'type': 'search_files', 'id': 'request-1', 'query': 'resume', 'owner_hint': 'Hari',
+            }))
+            opened = await ws_client._handle(json.dumps({
+                'type': 'open_selected_file', 'id': 'request-2', 'candidate_id': 'opaque',
+            }))
+
+        self.assertEqual(found, {'type': 'document_result', 'id': 'request-1', 'result': search_result})
+        self.assertEqual(opened['id'], 'request-2')
+        self.assertTrue(opened['result']['ok'])
+        search.assert_called_once_with('resume', 'Hari', '', '')
+        open_choice.assert_called_once_with('opaque')
+
     async def test_each_action_is_run_in_order_and_announced_after_it_finishes(self):
         import ws_client
 
@@ -180,7 +382,12 @@ class WebSocketActionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(ws_client, 'run_action', side_effect=fake_run):
             await ws_client._handle('{"type": "actions", "actions": %s}' % __import__('json').dumps(batch), on_say=on_say)
 
-        self.assertEqual(order, [('run', 'open_browser'), ('say', 'Opened site.'), ('run', 'open_file'), ('say', 'No file.')])
+        self.assertEqual(order, [
+            ('run', 'open_browser'),
+            ('say', 'Opened site.'),
+            ('run', 'open_file'),
+            ('say', 'I could not find a file matching "x". Please say more of its filename or its folder.'),
+        ])
         self.assertTrue(all(priority == 'APPEND' for _, priority in spoken))
 
     async def test_garbage_action_payloads_are_ignored(self):

@@ -51,6 +51,7 @@ VAD_TURN_DETECTION = TurnDetectionConfig(
 def make_channel() -> dict:
     """Generate a fresh channel name + RTC token for the user."""
     uid = random.randint(1000, 9_999_999)
+    agent_uid = random.randint(10_000_000, 99_999_999)
     channel = f"veera-{random.randint(1000, 9999)}"
     token = generate_convo_ai_token(
         app_id=AGORA_APP_ID,
@@ -59,13 +60,11 @@ def make_channel() -> dict:
         uid=uid,
         token_expire=3600,
     )
-    return {"app_id": AGORA_APP_ID, "channel": channel, "uid": uid, "token": token}
+    return {"app_id": AGORA_APP_ID, "channel": channel, "uid": uid, "agent_uid": agent_uid, "token": token}
 
 
-async def start(channel: str, user_uid: int, access_id: str, user_name: str = "User") -> str:
+async def start(channel: str, user_uid: int, agent_uid: int, access_id: str, user_name: str = "User") -> str:
     """Start the voice pipeline and return the agent_id."""
-    agent_uid = random.randint(10_000_000, 99_999_999)
-
     llm = AgoraOpenAI(
         api_key=DESKTOP_KEY or "veera-internal",
         base_url=f"{VEERA_URL}/v1/chat/completions",
@@ -102,7 +101,7 @@ async def start(channel: str, user_uid: int, access_id: str, user_name: str = "U
         AgoraAgent(
             client=_agora,
             instructions="You are Veera, a helpful voice assistant. Be concise.",
-            greeting="Hi! I'm Veera. How can I help?",
+            greeting="Hi! I'm Veera. I'm a realtime conversational and agentic virtual assistant. How can I help you?",
             failure_message="One moment please.",
             max_history=50,
             turn_detection={

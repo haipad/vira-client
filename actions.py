@@ -28,6 +28,7 @@ OPENABLE_EXTENSIONS = frozenset(
     ".png .jpg .jpeg .gif .bmp .webp .svg .mp3 .wav .m4a .flac .mp4 .mkv .mov .avi .webm".split()
 )
 _SKIP_DIRS = frozenset({"node_modules", "__pycache__", "venv", "appdata", "$recycle.bin", "site-packages"})
+_GENERIC_FILE_WORDS = frozenset({"file", "document", "documents", "pdf", "doc", "docx"})
 EXPLAINABLE_EXTENSIONS = frozenset({".pdf", ".docx", ".txt", ".md"})
 MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 MAX_FULL_PDF_PAGES = 20
@@ -35,6 +36,9 @@ MAX_SELECTED_PAGES = 5
 DOCUMENT_REF_TTL_SECONDS = 600
 _DOCUMENT_REFS: dict[str, tuple[Path, int, float, float]] = {}
 _DOCUMENT_REFS_LOCK = threading.Lock()
+_FILE_CHOICES: dict[str, tuple[Path, int, int, float]] = {}
+_FILE_CHOICES_LOCK = threading.Lock()
+FILE_CHOICE_TTL_SECONDS = 600
 _SHELL_FOLDER_KEYS = {
     "desktop": "Desktop",
     "documents": "Personal",
@@ -67,6 +71,25 @@ def search_roots() -> list[Path]:
         if folder.is_dir() and folder not in roots:
             roots.append(folder)
     return roots
+
+
+def compile_filename_pattern(pattern: str | None):
+    """Compile a small, bounded filename-only regex; paths, groups, alternation and nested quantifiers are rejected."""
+    if pattern is None or not str(pattern).strip():
+        return None
+    pattern = str(pattern).strip()
+    if len(pattern) > 100:
+        raise ValueError("Filename pattern must be at most 100 characters.")
+    if '/' in pattern or re.search(r'\\(?!\.)', pattern):
+        raise ValueError("Filename patterns may match names only, not paths.")
+    if not re.fullmatch(r'[A-Za-z0-9 _\.\-\^$*?\\]+', pattern):
+        raise ValueError("Pattern supports filename text, ., *, ?, ^, $, and escaped dots only.")
+    if re.search(r'[*?]{2,}', pattern):
+        raise ValueError("Consecutive quantifiers are not allowed in filename patterns.")
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        raise ValueError(f"Invalid filename pattern: {exc}")
 
 
 def check_url(raw: str | None) -> str:
@@ -114,20 +137,33 @@ def take_screenshot() -> dict:
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"screenshot-{datetime.now():%Y%m%d-%H%M%S}.png"
     ImageGrab.grab(all_screens=True).save(path)
-    return {"ok": True, "file": path.name, "path": str(path)}
+    return {"ok": True, "file": path.name, "path": str(path), "location": "Pictures/Screenshots"}
 
 
-def find_file(query: str, roots: list[Path] | None = None, max_depth: int = 4, budget: float = 3.0) -> Path | None:
-    """Best openable file whose name matches: exact name, then prefix, then all words; newest wins ties."""
+def find_file_matches(
+    query: str,
+    roots: list[Path] | None = None,
+    max_depth: int = 4,
+    budget: float = 3.0,
+    limit: int = 8,
+    filename_pattern: str | None = None,
+    owner_hint: str = "",
+) -> list[tuple[int, float, Path]]:
+    """Rank filename matches without substring false positives such as 're' inside 'resume'."""
     text = (query or "").strip()
     stem, ext = os.path.splitext(text)
     wanted_ext = ext.lower() if ext.lower() in OPENABLE_EXTENSIONS else None
     words = re.findall(r"[a-z0-9]+", (stem if wanted_ext else text).lower())
-    if not words:
-        return None
+    if not wanted_ext and words and f".{words[-1]}" in OPENABLE_EXTENSIONS:
+        wanted_ext = f".{words.pop()}"
+    words = [word for word in words if (len(word) >= 3 or word == "cv") and word not in _GENERIC_FILE_WORDS]
+    pattern = compile_filename_pattern(filename_pattern)
+    if not words and pattern is None:
+        return []
     wanted = "".join(words)
+    hint_words = set(re.findall(r"[a-z0-9]+", owner_hint.lower()))
     deadline = time.monotonic() + budget
-    best: tuple[int, float, Path] | None = None
+    matches: list[tuple[int, float, Path]] = []
 
     for root in roots if roots is not None else search_roots():
         stack = [(root, 0)]
@@ -147,21 +183,30 @@ def find_file(query: str, roots: list[Path] | None = None, max_depth: int = 4, b
                     suffix = os.path.splitext(entry.name)[1].lower()
                     if suffix not in OPENABLE_EXTENSIONS or (wanted_ext and suffix != wanted_ext):
                         continue
-                    name_key = re.sub(r"[^a-z0-9]+", "", os.path.splitext(entry.name)[0].lower())
+                    if pattern and not pattern.search(entry.name):
+                        continue
+                    name_words = re.findall(r"[a-z0-9]+", os.path.splitext(entry.name)[0].lower())
+                    name_key = "".join(name_words)
+                    owner_priority = int(bool(hint_words) and hint_words.issubset(name_words))
                     if name_key == wanted:
+                        score = 4
+                    elif len(wanted) >= 4 and name_key.startswith(wanted):
                         score = 3
-                    elif name_key.startswith(wanted):
+                    elif all(word in name_words for word in words):
                         score = 2
-                    elif all(word in name_key for word in words):
-                        score = 1
                     else:
                         continue
-                    candidate = (score, entry.stat().st_mtime, Path(entry.path))
+                    candidate = (score + owner_priority * 10, entry.stat().st_mtime, Path(entry.path))
                 except OSError:
                     continue
-                if best is None or candidate[:2] > best[:2]:
-                    best = candidate
-    return best[2] if best else None
+                matches.append(candidate)
+    matches.sort(key=lambda candidate: (candidate[0], candidate[1]), reverse=True)
+    return matches[:limit]
+
+
+def find_file(query: str, roots: list[Path] | None = None, max_depth: int = 4, budget: float = 3.0) -> Path | None:
+    matches = find_file_matches(query, roots, max_depth, budget, limit=1)
+    return matches[0][2] if matches else None
 
 
 def _launch(path: Path) -> None:
@@ -173,10 +218,97 @@ def _launch(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
-def open_file_by_name(name: str) -> dict:
-    path = find_file(name)
-    if path is None:
+def search_file_candidates(query: str, owner_hint: str = "", folder: str = "", filename_pattern: str = "") -> dict:
+    roots = search_roots()
+    if folder:
+        normalized_folder = folder.strip().lower()
+        if normalized_folder not in _SHELL_FOLDER_KEYS:
+            return {"ok": False, "error": "Unsupported search folder."}
+        roots = [known_folder(normalized_folder)]
+    try:
+        matches = find_file_matches(query, roots=roots, limit=5, filename_pattern=filename_pattern, owner_hint=owner_hint)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    candidates = []
+    now = time.monotonic()
+    with _FILE_CHOICES_LOCK:
+        for token, entry in list(_FILE_CHOICES.items()):
+            if entry[3] <= now:
+                _FILE_CHOICES.pop(token, None)
+        for _, _, path in matches[:5]:
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                stat = path.stat()
+            except OSError:
+                continue
+            token = secrets.token_urlsafe(18)
+            _FILE_CHOICES[token] = (path, stat.st_size, stat.st_mtime_ns, now + FILE_CHOICE_TTL_SECONDS)
+            location = path.parent.name
+            for root in roots:
+                try:
+                    relative = path.parent.relative_to(root)
+                    location = root.name if str(relative) == '.' else f"{root.name}/{relative.as_posix()}"
+                    break
+                except ValueError:
+                    continue
+            candidates.append({"id": token, "name": path.name, "folder": location})
+    return {"ok": True, "candidates": candidates}
+
+
+def open_file_candidate(candidate_id: str) -> dict:
+    with _FILE_CHOICES_LOCK:
+        entry = _FILE_CHOICES.pop(candidate_id, None)
+    if not entry or entry[3] <= time.monotonic():
+        return {"ok": False, "error": "That choice expired. Please search again."}
+    path, size, modified, _ = entry
+    try:
+        stat = path.stat()
+        if path.is_symlink() or not path.is_file() or path.suffix.lower() not in OPENABLE_EXTENSIONS or stat.st_size != size or stat.st_mtime_ns != modified:
+            return {"ok": False, "error": "That file changed or is no longer available. Please search again."}
+        _launch(path)
+    except OSError:
+        return {"ok": False, "error": "Could not open the selected file."}
+    result = {"ok": True, "file": path.name, "message": "Sent the file to its default application."}
+    if path.suffix.lower() in EXPLAINABLE_EXTENSIONS:
+        result["document"] = inspect_document_path(path)
+    return result
+
+
+def open_file_by_name(name: str, folder: str | None = None, filename_pattern: str | None = None) -> dict:
+    roots = None
+    if folder:
+        normalized_folder = folder.strip().lower()
+        if normalized_folder not in _SHELL_FOLDER_KEYS:
+            return {"ok": False, "error": f'Unsupported folder "{folder}".'}
+        root = known_folder(normalized_folder)
+        if not root.is_dir():
+            return {"ok": False, "error": f'The {folder} folder is unavailable.'}
+        roots = [root]
+    try:
+        matches = find_file_matches(name, roots=roots, filename_pattern=filename_pattern)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not matches:
         return {"ok": False, "error": f'No document or media file matching "{name}" was found.'}
+    best_score = matches[0][0]
+    equally_good = [path for score, _, path in matches if score == best_score]
+    if len(equally_good) > 1:
+        choices = equally_good[:5]
+        name_counts: dict[str, int] = {}
+        for path in equally_good:
+            name_counts[path.name.casefold()] = name_counts.get(path.name.casefold(), 0) + 1
+        return {
+            "ok": False,
+            "status": "ambiguous",
+            "matches": [
+                f"{path.name} in {path.parent.name}" if name_counts[path.name.casefold()] > 1 else path.name
+                for path in choices
+            ],
+            "error": "More than one file matches that name.",
+        }
+    path = equally_good[0]
     _launch(path)
     return {"ok": True, "file": path.name, "path": str(path)}
 
@@ -204,6 +336,10 @@ def inspect_document_by_name(name: str) -> dict:
     path = find_file(name)
     if path is None or path.suffix.lower() not in EXPLAINABLE_EXTENSIONS:
         return {"ok": False, "status": "not_found", "error": f'No PDF, DOCX, TXT, or Markdown file matching "{name}" was found.'}
+    return inspect_document_path(path)
+
+
+def inspect_document_path(path: Path) -> dict:
     try:
         stat = path.stat()
         if stat.st_size > MAX_DOCUMENT_BYTES:
@@ -268,9 +404,6 @@ def read_document_ref(
 def finish_document_ref(document_ref: str, path: Path, read_succeeded: bool, open_after_read: bool) -> None:
     if read_succeeded and open_after_read:
         _launch(path)
-    if read_succeeded:
-        with _DOCUMENT_REFS_LOCK:
-            _DOCUMENT_REFS.pop(document_ref, None)
 
 
 def run_action(action: dict) -> dict:
@@ -282,7 +415,11 @@ def run_action(action: dict) -> dict:
         if kind == "take_screenshot":
             return take_screenshot()
         if kind == "open_file":
-            return open_file_by_name(str(action.get("name") or ""))
+            return open_file_by_name(
+                str(action.get("name") or ""),
+                action.get("folder"),
+                action.get("filename_pattern"),
+            )
         return {"ok": False, "error": f"Unknown action: {kind}"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -290,6 +427,24 @@ def run_action(action: dict) -> dict:
 
 def outcome_text(action: dict, result: dict) -> str:
     """The sentence to speak once the action finished; {file} becomes the matched file's name."""
+    if action.get("action") == "take_screenshot" and result.get("ok"):
+        return "The screenshot was saved in your Pictures/Screenshots folder."
+    if action.get("action") == "open_file":
+        if result.get("status") == "ambiguous":
+            names = [str(name) for name in (result.get("matches") or [])[:5]]
+            suffix = ". Say which to open, or give more detail."
+            while names and len(f"Several files match: {', '.join(names)}{suffix}") > MAX_MESSAGE_CHARS:
+                names.pop()
+            if not names:
+                return "I found several files. Please say the full filename you want me to open."
+            return f"Several files match: {', '.join(names)}{suffix}"
+        if not result.get("ok"):
+            requested = ' '.join(str(action.get("name") or "").split())
+            if requested:
+                return f'I could not find a file matching "{requested}". Please say more of its filename or its folder.'[:MAX_MESSAGE_CHARS]
+            return "I could not find that file. Please say more of its filename or its folder."
+        filename = str(result.get("file") or action.get("name") or "the file")
+        return f"Opened {filename}."
     ok = bool(result.get("ok"))
     text = str(action.get("success_message" if ok else "failure_message") or "").strip()
     if not text:

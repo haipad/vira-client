@@ -15,9 +15,11 @@ from actions import (
     execute,
     finish_document_ref,
     inspect_document_by_name,
+    open_file_candidate,
     outcome_text,
     read_document_ref,
     run_action,
+    search_file_candidates,
 )
 
 load_dotenv()
@@ -49,13 +51,37 @@ def _upload_document(request_id: str, data: bytes) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
-async def _handle(message: str, on_say=None, on_state=None):
+async def _handle(message: str, on_say=None, on_state=None, on_transcript=None):
     try:
         msg = json.loads(message)
     except json.JSONDecodeError:
         return
 
     msg_type = msg.get("type")
+
+    if msg_type == "transcript":
+        if on_transcript and msg.get("speaker") in ("user", "assistant") and isinstance(msg.get("text"), str):
+            await on_transcript(msg["speaker"], msg["text"])
+        return None
+
+    if msg_type == "execute_action":
+        result = await asyncio.to_thread(run_action, msg.get("action"))
+        result.pop("path", None)
+        return {"type": "document_result", "id": msg.get("id"), "result": result}
+
+    if msg_type == "search_files":
+        result = await asyncio.to_thread(
+            search_file_candidates,
+            msg.get("query", ""),
+            msg.get("owner_hint", ""),
+            msg.get("folder", ""),
+            msg.get("filename_pattern", ""),
+        )
+        return {"type": "document_result", "id": msg.get("id"), "result": result}
+
+    if msg_type == "open_selected_file":
+        result = await asyncio.to_thread(open_file_candidate, msg.get("candidate_id", ""))
+        return {"type": "document_result", "id": msg.get("id"), "result": result}
 
     if msg_type == "inspect_document":
         result = await asyncio.to_thread(inspect_document_by_name, msg.get("name", ""))
@@ -112,12 +138,13 @@ async def _run_actions(actions, on_say) -> None:
         result = await asyncio.to_thread(run_action, action)
         text = outcome_text(action if isinstance(action, dict) else {}, result)
         print(f"[vira-client] action {action.get('action') if isinstance(action, dict) else action}: "
-              f"{'ok' if result.get('ok') else 'failed'} - {result.get('error') or result.get('file') or result.get('url') or ''}", flush=True)
+              f"{'ok' if result.get('ok') else 'failed'} - "
+              f"{result.get('error') or result.get('path') or result.get('file') or result.get('url') or ''}", flush=True)
         if on_say:
             await on_say(text, "APPEND")
 
 
-async def connect(client_id: str, on_say=None, on_connect=None, on_state=None):
+async def connect(client_id: str, on_say=None, on_connect=None, on_state=None, on_transcript=None):
     """
     Maintain a persistent WS connection with auto-reconnect.
     on_say(text, priority) — called when backend pushes a say message.
@@ -135,7 +162,7 @@ async def connect(client_id: str, on_say=None, on_connect=None, on_state=None):
                     await on_connect(ws)
 
                 async for raw in ws:
-                    result = await _handle(raw, on_say=on_say, on_state=on_state)
+                    result = await _handle(raw, on_say=on_say, on_state=on_state, on_transcript=on_transcript)
                     if result:
                         await ws.send(json.dumps(result))
 
